@@ -33,6 +33,7 @@ st.markdown("""
     [data-testid="stHeader"] {display: none;}
     footer {display: none;}
 
+    /* 코인 선택 버튼 */
     .stRadio div[role="radiogroup"] { flex-direction: row !important; gap: 10px; }
     .stRadio div[role="radiogroup"] label { 
         background: #1a1a2e; border: 1px solid var(--border); padding: 5px 20px !important; border-radius: 4px; color: var(--dim); font-weight: 800; cursor: pointer; transition: 0.3s;
@@ -40,20 +41,19 @@ st.markdown("""
     .stRadio div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child { display: none; }
     .stRadio div[role="radiogroup"] label:hover { border-color: var(--green); }
     
-    .magnet-card { 
-        background: linear-gradient(90deg, rgba(255,140,0,0.1) 0%, rgba(5,5,10,1) 100%);
-        border-left: 5px solid var(--orange); padding: 15px; border-radius: 4px; margin: 15px 0;
-        display: flex; justify-content: space-between; align-items: center;
+    /* 분석 카드 디자인 */
+    .analysis-card { 
+        background: var(--card); border: 1px solid var(--border); padding: 20px; border-radius: 12px; margin-bottom: 15px;
     }
-    .magnet-val { font-size: 24px; font-weight: 900; color: var(--orange); }
-    .status-tag { padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 800; }
+    .status-tag { padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 900; color: #000; text-transform: uppercase; }
 
-    .briefing-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; height: 280px; overflow-y: auto; margin-top: 20px; border-top: 2px solid var(--gold); }
+    /* 로그 컨테이너 */
+    .briefing-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; height: 300px; overflow-y: auto; margin-top: 20px; border-top: 2px solid var(--gold); }
     .log-entry { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; font-family: 'JetBrains Mono'; }
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 데이터 엔진
+# 3. 데이터 엔진 (OI 및 가격 분석 통합)
 def safe_api_call(url, payload=None, is_post=True):
     try:
         if is_post: res = requests.post(url, json=payload, timeout=10)
@@ -62,15 +62,24 @@ def safe_api_call(url, payload=None, is_post=True):
     except: return None
 
 @st.cache_data(ttl=12)
-def fetch_all_data(coin, period):
+def fetch_terminal_data(coin, period):
+    # 1. 현재가 (Hyperliquid)
     mids = safe_api_call("https://api.hyperliquid.xyz/info", {"type": "allMids"})
     px = float(mids[coin]) if mids and coin in mids else 0
     if px == 0: return None
     
+    # 2. 바이낸스 미결제약정 (OI)
+    oi_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={coin}USDT", is_post=False)
+    cur_oi = float(oi_res['openInterest']) if oi_res else 0
+
+    # 3. 바이낸스 실시간 청산
+    bn_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={coin}USDT&limit=50", is_post=False)
+    actual_m = sum(float(o['origQty']) * float(o['price']) for o in bn_res) / 1e6 if isinstance(bn_res, list) else 0
+
+    # 4. 하이퍼리퀴드 고래 포지션 (Leaderboard 기반)
     cfg = {"24H": 100, "48H": 150, "1W": 200, "ALL": 300}.get(period, 100)
     window = "allTime" if period == "ALL" else "day"
     lb = safe_api_call(f"https://stats-data.hyperliquid.xyz/Mainnet/leaderboard?window={window}", is_post=False)
-    
     hl_pos = []
     if lb:
         addrs = [r["ethAddress"] for r in lb.get("leaderboardRows", [])[:cfg] if r.get("ethAddress")]
@@ -85,51 +94,82 @@ def fetch_all_data(coin, period):
         with ThreadPoolExecutor(max_workers=30) as ex:
             hl_pos = [r for r in list(ex.map(fetch_hl, addrs)) if r]
 
+    # 자석 강도: 현재가 ±1% 잠재 물량 + 실시간 청산액
     potential_vol = sum(p['posVal'] for p in hl_pos if px * 0.99 <= p['liqPx'] <= px * 1.01)
-    bn_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={coin}USDT&limit=50", is_post=False)
-    actual_liq = sum(float(o['origQty']) * float(o['price']) for o in bn_res) if isinstance(bn_res, list) else 0
     
-    return {"price": px, "positions": hl_pos, "magnet": (potential_vol + actual_liq) / 1e6, "actual": actual_liq / 1e6}
+    return {"price": px, "oi": cur_oi, "actual": actual_m, "positions": hl_pos, "magnet": (potential_vol / 1e6) + actual_m}
 
-# 4. 메인 실행 파트
+# 4. 메인 대시보드 실행
+if 'prev_oi' not in st.session_state: st.session_state.prev_oi = 0
+if 'prev_px' not in st.session_state: st.session_state.prev_px = 0
 if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
-if 'last_coin' not in st.session_state: st.session_state.last_coin = None
 
-# 헤더 (타이틀 변경 완료)
+# 헤더
 h_col1, h_col2 = st.columns([2.5, 1])
 with h_col1:
     st.markdown(f"<h1 style='color:var(--green); margin:0; font-weight:900; font-size:32px;'>🐋 TIMINGBIT LIQUIDATION INTELLIGENCE</h1>", unsafe_allow_html=True)
 with h_col2:
     coin = st.radio("COIN", ["BTC", "ETH", "SOL"], horizontal=True, label_visibility="collapsed")
 
-if st.session_state.last_coin != coin:
-    add_log(f"분석 코인이 <b>{coin}</b>으로 스위칭되었습니다.", "info")
-    st.session_state.last_coin = coin
-
-data = fetch_all_data(coin, st.session_state.get('period', "24H"))
+data = fetch_terminal_data(coin, st.session_state.get('period', "24H"))
 
 if data:
-    px, magnet_score, actual_m = data['price'], data['magnet'], data['actual']
+    px, cur_oi, actual_m, magnet_score = data['price'], data['oi'], data['actual'], data['magnet']
     all_pos = data['positions']
-    
-    status = "STABLE"
-    status_color = "#6b6b7b"
-    if magnet_score > 5: status, status_color = "WARNING", "#ff8c00"
-    if magnet_score > 15: status, status_color = "CRITICAL", "#ff3e3e"
-    
-    if actual_m > 0.3:
-        add_log(f"🔥 바이낸스 실시간 청산 감지: <b>${actual_m:.2f}M</b>", "danger")
 
-    st.markdown(f"""
-        <div class="magnet-card">
-            <div>
-                <span style="color:var(--dim); font-size:12px;">{coin} 청산 자석 강도 (잠재+실시간)</span><br>
-                <span class="status-tag" style="background:{status_color}; color:#000;">{status}</span>
+    # 스마트 머니 매트릭스 연산
+    oi_diff = cur_oi - st.session_state.prev_oi if st.session_state.prev_oi > 0 else 0
+    px_diff = px - st.session_state.prev_px if st.session_state.prev_px > 0 else 0
+    
+    st.session_state.prev_oi = cur_oi
+    st.session_state.prev_px = px
+
+    # 신호 판별 로직 (유료 핵심)
+    sm_signal = "MARKET SCANNING..."
+    sm_color = "#6b6b7b"
+    sm_desc = "현재 유의미한 세력의 움직임이 포착되지 않았습니다."
+
+    if abs(oi_diff) > (cur_oi * 0.00001): # 미세한 변화 무시
+        if px_diff > 0 and oi_diff > 0:
+            sm_signal, sm_color, sm_desc = "SMART MONEY ACCUMULATING", "var(--green)", "상승과 함께 OI 증가. 세력이 롱 포지션을 공격적으로 매집 중입니다."
+        elif px_diff > 0 and oi_diff < 0:
+            sm_signal, sm_color, sm_desc = "SHORT COVERING DETECTED", "var(--orange)", "상승 중 OI 감소. 숏 포지션의 강제 종료로 인한 일시적 반등일 확률이 높습니다."
+        elif px_diff < 0 and oi_diff > 0:
+            sm_signal, sm_color, sm_desc = "AGGRESSIVE SELLING", "var(--red)", "하락과 함께 OI 증가. 세력이 신규 숏 포지션을 대거 구축하고 있습니다."
+        elif px_diff < 0 and oi_diff < 0:
+            sm_signal, sm_color, sm_desc = "LONG LIQUIDATION EXHAUSTION", "var(--cyan)", "하락 중 OI 감소. 롱 포지션이 털리는 중이며 하락세가 잦아들 수 있습니다."
+
+    if actual_m > 0.5:
+        add_log(f"🚨 {coin} 바이낸스 대량 청산 발생: <b>${actual_m:.2f}M</b>", "danger")
+
+    # 상단 분석 레이아웃 (2열)
+    a_col1, a_col2 = st.columns(2)
+    with a_col1:
+        st.markdown(f"""
+            <div class="analysis-card" style="border-top: 4px solid {sm_color};">
+                <div style="color:var(--dim); font-size:12px; margin-bottom:5px;">SMART MONEY FLOW ANALYSIS</div>
+                <div style="font-size:22px; font-weight:900; color:{sm_color};">{sm_signal}</div>
+                <div style="color:#e1e1e6; font-size:13px; margin-top:5px; line-height:1.5;">{sm_desc}</div>
+                <div style="margin-top:10px; font-size:12px; color:var(--dim);">OI Delta: <span style="color:{'var(--green)' if oi_diff > 0 else 'var(--red)'}">{oi_diff:+,.2f}</span></div>
             </div>
-            <div class="magnet-val">${magnet_score:.2f}M</div>
-        </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    
+    with a_col2:
+        status = "STABLE"
+        status_color = "#6b6b7b"
+        if magnet_score > 5: status, status_color = "WARNING", "var(--orange)"
+        if magnet_score > 15: status, status_color = "CRITICAL", "var(--red)"
+        
+        st.markdown(f"""
+            <div class="analysis-card" style="border-top: 4px solid {status_color};">
+                <div style="color:var(--dim); font-size:12px; margin-bottom:5px;">LIQUIDATION MAGNET INTENSITY</div>
+                <div style="font-size:22px; font-weight:900; color:{status_color};">${magnet_score:.2f}M</div>
+                <div style="margin-top:12px;"><span class="status-tag" style="background:{status_color};">{status}</span></div>
+                <div style="margin-top:8px; font-size:12px; color:var(--dim);">현재가 ±1% 내에 포진한 잠재적 폭발력입니다.</div>
+            </div>
+        """, unsafe_allow_html=True)
 
+    # 필터 컨트롤러
     cc = st.columns([1, 1, 1, 1])
     with cc[0]: period = st.selectbox("분석 그룹", ["24H", "48H", "1W", "ALL"], index=["24H", "48H", "1W", "ALL"].index(st.session_state.get('period', "24H")))
     with cc[1]: range_p = st.selectbox("표시 범위 %", [1, 2, 5, 10, 15, 20, 25], index=3)
@@ -140,10 +180,10 @@ if data:
 
     if period != st.session_state.get('period', "24H"):
         st.session_state.period = period
-        add_log(f"분석 데이터 셋이 {period} 기준으로 갱신되었습니다.", "warning")
+        add_log(f"데이터 셋 갱신: {period}", "warning")
         st.rerun()
 
-    tL, tS = sum(p['posVal'] for p in all_pos if p['isLong']), sum(p['posVal'] for p in all_pos if not p['isLong'])
+    # 사다리 연산 및 시각화 데이터 준비
     lo, hi = px * (1 - range_p/100), px * (1 + range_p/100)
     ladder = {}
     for p in all_pos:
@@ -157,14 +197,14 @@ if data:
     magnets = {p: (v['L']+v['S']) / ((abs(p-px)/px*100 + 0.1)**1.5) for p, v in ladder.items()}
     golden = sorted(magnets, key=magnets.get, reverse=True)[:5] if magnets else []
     max_v, max_d = max([v["L"] + v["S"] for v in ladder.values()] + [1]), max([abs(v["S"] - v["L"]) for v in ladder.values()] + [1])
-    
     whales = sorted(all_pos, key=lambda x: x['posVal'], reverse=True)[:10]
     for w in whales:
         w['ent'] = w['liqPx'] / (1 - 0.2) if w['isLong'] else w['liqPx'] / (1 + 0.2)
         w['isP'] = (px > w['ent']) if w['isLong'] else (px < w['ent'])
 
-    payload = json.dumps({"price": px, "map": ladder, "whales": whales, "maxV": max_v, "maxD": max_d, "gold": golden, "coin": coin, "minV": min_val, "tL": tL, "tS": tS})
+    payload = json.dumps({"price": px, "map": ladder, "whales": whales, "maxV": max_v, "maxD": max_d, "gold": golden, "coin": coin, "minV": min_val, "tL": sum(p['posVal'] for p in all_pos if p['isLong']), "tS": sum(p['posVal'] for p in all_pos if not p['isLong'])})
 
+    # 고래 카드 + 청산 사다리 (HTML/JS)
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -229,6 +269,7 @@ if data:
     """
     components.html(html_code, height=1200, scrolling=True)
 
+    # 실시간 분석 로그
     st.markdown(f"<h3 style='color:var(--gold); margin-top:30px; font-size:18px; font-weight:900;'>📡 통합 실시간 분석 로그</h3>", unsafe_allow_html=True)
     briefing_html = "".join(st.session_state.briefing_history[:50])
     st.markdown(f'<div class="briefing-container">{briefing_html}</div>', unsafe_allow_html=True)
