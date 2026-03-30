@@ -33,7 +33,6 @@ st.markdown("""
     [data-testid="stHeader"] {display: none;}
     footer {display: none;}
 
-    /* 코인 선택 버튼 */
     .stRadio div[role="radiogroup"] { flex-direction: row !important; gap: 10px; }
     .stRadio div[role="radiogroup"] label { 
         background: #1a1a2e; border: 1px solid var(--border); padding: 5px 20px !important; border-radius: 4px; color: var(--dim); font-weight: 800; cursor: pointer; transition: 0.3s;
@@ -41,7 +40,6 @@ st.markdown("""
     .stRadio div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child { display: none; }
     .stRadio div[role="radiogroup"] label:hover { border-color: var(--green); }
     
-    /* 자석 강도 카드 */
     .magnet-card { 
         background: linear-gradient(90deg, rgba(255,140,0,0.1) 0%, rgba(5,5,10,1) 100%);
         border-left: 5px solid var(--orange); padding: 15px; border-radius: 4px; margin: 15px 0;
@@ -50,13 +48,12 @@ st.markdown("""
     .magnet-val { font-size: 24px; font-weight: 900; color: var(--orange); }
     .status-tag { padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 800; }
 
-    /* 로그 컨테이너 */
     .briefing-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; height: 280px; overflow-y: auto; margin-top: 20px; border-top: 2px solid var(--gold); }
     .log-entry { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; font-family: 'JetBrains Mono'; }
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 데이터 엔진 (자석 강도 로직 통합)
+# 3. 데이터 엔진
 def safe_api_call(url, payload=None, is_post=True):
     try:
         if is_post: res = requests.post(url, json=payload, timeout=10)
@@ -66,12 +63,10 @@ def safe_api_call(url, payload=None, is_post=True):
 
 @st.cache_data(ttl=12)
 def fetch_all_data(coin, period):
-    # 가격 정보
     mids = safe_api_call("https://api.hyperliquid.xyz/info", {"type": "allMids"})
     px = float(mids[coin]) if mids and coin in mids else 0
     if px == 0: return None
     
-    # 하이퍼리퀴드 고래 데이터 (최대 150명 분석)
     cfg = {"24H": 100, "48H": 150, "1W": 200, "ALL": 300}.get(period, 100)
     window = "allTime" if period == "ALL" else "day"
     lb = safe_api_call(f"https://stats-data.hyperliquid.xyz/Mainnet/leaderboard?window={window}", is_post=False)
@@ -90,7 +85,6 @@ def fetch_all_data(coin, period):
         with ThreadPoolExecutor(max_workers=30) as ex:
             hl_pos = [r for r in list(ex.map(fetch_hl, addrs)) if r]
 
-    # 자석 강도 연산: 현재가 ±1% 이내 잠재 물량 + 바이낸스 실제 청산
     potential_vol = sum(p['posVal'] for p in hl_pos if px * 0.99 <= p['liqPx'] <= px * 1.01)
     bn_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={coin}USDT&limit=50", is_post=False)
     actual_liq = sum(float(o['origQty']) * float(o['price']) for o in bn_res) if isinstance(bn_res, list) else 0
@@ -101,14 +95,13 @@ def fetch_all_data(coin, period):
 if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
 if 'last_coin' not in st.session_state: st.session_state.last_coin = None
 
-# 헤더
-h_col1, h_col2 = st.columns([2, 1])
+# 헤더 (타이틀 변경 완료)
+h_col1, h_col2 = st.columns([2.5, 1])
 with h_col1:
-    st.markdown(f"<h1 style='color:var(--green); margin:0; font-weight:900; font-size:32px;'>🐋 LIQUIDATION INTELLIGENCE PRO</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='color:var(--green); margin:0; font-weight:900; font-size:32px;'>🐋 TIMINGBIT LIQUIDATION INTELLIGENCE</h1>", unsafe_allow_html=True)
 with h_col2:
     coin = st.radio("COIN", ["BTC", "ETH", "SOL"], horizontal=True, label_visibility="collapsed")
 
-# 코인 변경 감지 로그
 if st.session_state.last_coin != coin:
     add_log(f"분석 코인이 <b>{coin}</b>으로 스위칭되었습니다.", "info")
     st.session_state.last_coin = coin
@@ -119,7 +112,6 @@ if data:
     px, magnet_score, actual_m = data['price'], data['magnet'], data['actual']
     all_pos = data['positions']
     
-    # 상태값 판별
     status = "STABLE"
     status_color = "#6b6b7b"
     if magnet_score > 5: status, status_color = "WARNING", "#ff8c00"
@@ -128,7 +120,6 @@ if data:
     if actual_m > 0.3:
         add_log(f"🔥 바이낸스 실시간 청산 감지: <b>${actual_m:.2f}M</b>", "danger")
 
-    # 상단 자석 강도 UI
     st.markdown(f"""
         <div class="magnet-card">
             <div>
@@ -139,7 +130,6 @@ if data:
         </div>
     """, unsafe_allow_html=True)
 
-    # 필터 컨트롤러
     cc = st.columns([1, 1, 1, 1])
     with cc[0]: period = st.selectbox("분석 그룹", ["24H", "48H", "1W", "ALL"], index=["24H", "48H", "1W", "ALL"].index(st.session_state.get('period', "24H")))
     with cc[1]: range_p = st.selectbox("표시 범위 %", [1, 2, 5, 10, 15, 20, 25], index=3)
@@ -153,7 +143,6 @@ if data:
         add_log(f"분석 데이터 셋이 {period} 기준으로 갱신되었습니다.", "warning")
         st.rerun()
 
-    # 사다리 연산
     tL, tS = sum(p['posVal'] for p in all_pos if p['isLong']), sum(p['posVal'] for p in all_pos if not p['isLong'])
     lo, hi = px * (1 - range_p/100), px * (1 + range_p/100)
     ladder = {}
@@ -171,13 +160,11 @@ if data:
     
     whales = sorted(all_pos, key=lambda x: x['posVal'], reverse=True)[:10]
     for w in whales:
-        # 고래 평단가 추정 (레버리지 5배 가정)
         w['ent'] = w['liqPx'] / (1 - 0.2) if w['isLong'] else w['liqPx'] / (1 + 0.2)
         w['isP'] = (px > w['ent']) if w['isLong'] else (px < w['ent'])
 
     payload = json.dumps({"price": px, "map": ladder, "whales": whales, "maxV": max_v, "maxD": max_d, "gold": golden, "coin": coin, "minV": min_val, "tL": tL, "tS": tS})
 
-    # 시각화 컴포넌트 (HTML/JS)
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -185,7 +172,7 @@ if data:
         <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600;800&display=swap" rel="stylesheet">
         <style>
             :root{{--bg:#05050a;--card:#0e0e1a;--ln:#1e1e30;--g:#00ffa3;--r:#ff3e3e;--gold:#ffcc00;--cyan:#00f2ff;--orange:#ff8c00;--dim:#6b6b7b;}}
-            body{{background:var(--bg); color:#e1e1e6; font-family:'JetBrains Mono', monospace; margin:0; padding:10px; overflow-x:hidden;}}
+            body{{background:var(--bg); color:#e1e1e6; font-family:'JetBrains Mono', monospace; margin:0; padding:10px; overflow:hidden;}}
             #wCard{{display:grid; grid-template-columns: repeat(5, 1fr); gap:12px; margin-bottom:20px;}}
             .wc{{background:var(--card); border:1px solid var(--ln); padding:15px; border-radius:8px; font-size:14px; position:relative; line-height:1.6;}}
             .pl-tag{{position:absolute; top:12px; right:12px; font-size:9px; font-weight:800; padding:2px 5px; border-radius:4px;}}
@@ -242,7 +229,6 @@ if data:
     """
     components.html(html_code, height=1200, scrolling=True)
 
-    # 하단 브리핑 로그
     st.markdown(f"<h3 style='color:var(--gold); margin-top:30px; font-size:18px; font-weight:900;'>📡 통합 실시간 분석 로그</h3>", unsafe_allow_html=True)
     briefing_html = "".join(st.session_state.briefing_history[:50])
     st.markdown(f'<div class="briefing-container">{briefing_html}</div>', unsafe_allow_html=True)
