@@ -10,16 +10,15 @@ st.set_page_config(page_title="TIMINGBIT LIQUIDATION INTELLIGENCE", layout="wide
 def get_kst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
-# 로그 기록 함수
+# 로그 기록
 def add_log(msg, log_type="info"):
     colors = {"info": "#6b6b7b", "success": "#00ffa3", "warning": "#ff8c00", "danger": "#ff3e3e"}
     now = get_kst_now().strftime("%H:%M:%S")
     log_entry = f'<div class="log-entry" style="color:{colors.get(log_type, "#6b6b7b")}"><span style="color:#444">[ {now} ]</span> {msg}</div>'
-    if 'briefing_history' not in st.session_state:
-        st.session_state.briefing_history = []
+    if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
     st.session_state.briefing_history.insert(0, log_entry)
 
-# 2. 전역 스타일 (티커 글씨색 흰색으로 수정)
+# 2. 강력한 전역 스타일 (티커 흰색 고정 및 가독성 최적화)
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&display=swap');
@@ -31,21 +30,20 @@ st.markdown("""
     .stApp {background-color: var(--bg); color: #e1e1e6;}
     .block-container {padding: 0.5rem 2rem !important; max-width: 100%; font-family: 'JetBrains Mono', sans-serif !important;}
     [data-testid="stHeader"] {display: none;}
-    footer {display: none;}
-
-    /* 티커 버튼 (글씨색 흰색 강제 적용) */
+    
+    /* 티커 버튼 스타일 (흰색 글씨 강제) */
     .stRadio div[role="radiogroup"] { flex-direction: row !important; gap: 15px; }
     .stRadio div[role="radiogroup"] label { 
-        background: #1a1a2e; border: 2px solid var(--border); padding: 10px 45px !important; border-radius: 8px; 
-        color: #FFFFFF !important; font-size: 20px !important; font-weight: 900 !important; cursor: pointer; transition: 0.3s;
+        background: #1a1a2e !important; border: 2px solid var(--border) !important; padding: 10px 45px !important; border-radius: 8px !important; 
+        color: #FFFFFF !important; font-size: 22px !important; font-weight: 900 !important; cursor: pointer; transition: 0.3s;
     }
     .stRadio div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child { display: none; }
-    .stRadio div[role="radiogroup"] label:hover { border-color: var(--green); background: #252545; }
+    .stRadio div[role="radiogroup"] label:hover { border-color: var(--green) !important; background: #252545 !important; }
     
-    /* 선택된 버튼 강조 */
+    /* 선택된 코인 하이라이트 */
     div[data-testid="stMarkdownContainer"] + div .stRadio div[role="radiogroup"] label[data-checked="true"] {
         border-color: var(--green) !important;
-        background: rgba(0, 255, 163, 0.15) !important;
+        background: rgba(0, 255, 163, 0.2) !important;
         box-shadow: 0 0 15px rgba(0, 255, 163, 0.4);
     }
 
@@ -56,33 +54,34 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 데이터 엔진
+# 3. 데이터 엔진 (검증 로직 강화)
 def safe_api_call(url, payload=None, is_post=True):
     try:
-        if is_post: res = requests.post(url, json=payload, timeout=10)
-        else: res = requests.get(url, timeout=10)
+        if is_post: res = requests.post(url, json=payload, timeout=8)
+        else: res = requests.get(url, timeout=8)
         return res.json() if res.status_code == 200 else None
     except: return None
 
 @st.cache_data(ttl=12)
-def fetch_terminal_data(coin, period_label):
-    # 가격
+def fetch_verified_data(coin, period_label):
+    # 가격 정보
     mids = safe_api_call("https://api.hyperliquid.xyz/info", {"type": "allMids"})
     px = float(mids[coin]) if mids and coin in mids else 0
     
-    # 바이낸스 OI 및 청산액
+    # 바이낸스 실시간 OI
     oi_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={coin}USDT", is_post=False)
     cur_oi = float(oi_res['openInterest']) if oi_res else 0
+    
+    # 바이낸스 실시간 청산액
     bn_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={coin}USDT&limit=100", is_post=False)
     actual_m = sum(float(o['origQty']) * float(o['price']) for o in bn_res) / 1e6 if isinstance(bn_res, list) else 0
 
-    # 고래 데이터 분석 (인원 확대)
+    # 고래 리더보드 데이터
     cfg_map = {"24H": 150, "48H": 200, "3D": 250, "1W": 300, "2W": 400, "1M": 500, "ALL": 800}
-    user_count = cfg_map.get(period_label, 150)
     lb = safe_api_call(f"https://stats-data.hyperliquid.xyz/Mainnet/leaderboard?window=day", is_post=False)
     hl_pos = []
     if lb:
-        addrs = [r["ethAddress"] for r in lb.get("leaderboardRows", [])[:user_count] if r.get("ethAddress")]
+        addrs = [r["ethAddress"] for r in lb.get("leaderboardRows", [])[:cfg_map.get(period_label, 150)] if r.get("ethAddress")]
         def fetch_hl(a):
             d = safe_api_call("https://api.hyperliquid.xyz/info", {"type": "clearinghouseState", "user": a})
             if d and "assetPositions" in d:
@@ -94,71 +93,79 @@ def fetch_terminal_data(coin, period_label):
         with ThreadPoolExecutor(max_workers=40) as ex:
             hl_pos = [r for r in list(ex.map(fetch_hl, addrs)) if r]
 
-    potential_vol = sum(p['posVal'] for p in hl_pos if px * 0.985 <= p['liqPx'] <= px * 1.015)
+    potential_vol = sum(p['posVal'] for p in hl_pos if px * 0.98 <= p['liqPx'] <= px * 1.02)
     return {"price": px, "oi": cur_oi, "actual": actual_m, "positions": hl_pos, "magnet": (potential_vol/1e6)+actual_m}
 
 # 4. 메인 대시보드
 if 'oi_history' not in st.session_state: st.session_state.oi_history = {}
 if 'px_history' not in st.session_state: st.session_state.px_history = {}
-if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
 if 'period' not in st.session_state: st.session_state.period = "24H"
 
-# 헤더
-h_col1, h_col2 = st.columns([2.5, 1])
+# 상단 헤더
+h_col1, h_col2 = st.columns([2, 1])
 with h_col1:
     st.markdown(f"<h1 style='color:var(--green); margin:0; font-weight:900; font-size:36px;'>🐋 TIMINGBIT LIQUIDATION INTELLIGENCE</h1>", unsafe_allow_html=True)
 with h_col2:
-    coin = st.radio("COIN", ["BTC", "ETH"], horizontal=True, label_visibility="collapsed") # SOL 삭제 완료
+    coin = st.radio("COIN", ["BTC", "ETH"], horizontal=True, label_visibility="collapsed")
 
-data = fetch_terminal_data(coin, st.session_state.period)
+data = fetch_verified_data(coin, st.session_state.period)
 
 if data:
     px, cur_oi, actual_m, magnet_score = data['price'], data['oi'], data['actual'], data['magnet']
     all_pos = data['positions']
 
-    # 코인별 개별 OI 로직 점검 및 업데이트
+    # 코인별 개별 추적 로직 (OI 데이터 검증용)
     prev_oi = st.session_state.oi_history.get(coin, 0)
     prev_px = st.session_state.px_history.get(coin, 0)
-    
     oi_diff = cur_oi - prev_oi if prev_oi > 0 else 0
     px_diff = px - prev_px if prev_px > 0 else 0
     
     st.session_state.oi_history[coin] = cur_oi
     st.session_state.px_history[coin] = px
 
-    # 신호 판독
-    sm_signal, sm_color, sm_desc = "MARKET SCANNING...", "#6b6b7b", "세력의 유의미한 움직임을 추적 중입니다."
-    if abs(oi_diff) > 0.1: # 미세한 변화도 감지
-        if px_diff > 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "SMART MONEY ACCUMULATING", "var(--green)", "진짜 상승: 세력이 돈 싸들고 롱에 올라타는 중입니다."
-        elif px_diff > 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "SHORT COVERING DETECTED", "var(--orange)", "가짜 상승: 숏 개미들이 손절해서 나오는 반등입니다."
-        elif px_diff < 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "AGGRESSIVE SELLING", "var(--red)", "진짜 하락: 세력이 본격적으로 하락 배팅에 들어갔습니다."
-        elif px_diff < 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "LONG LIQUIDATION EXHAUSTION", "var(--cyan)", "가짜 하락: 롱 개미들 뚝배기 깨지는 중. 하락 끝물입니다."
+    # 신호 판별
+    sm_signal, sm_color, sm_desc = "INITIALIZING DATA...", "#6b6b7b", "첫 데이터를 수집 중입니다. 잠시만 기다려주세요."
+    if prev_oi > 0:
+        if abs(oi_diff) < 0.01:
+            sm_signal, sm_color, sm_desc = "MARKET CONSOLIDATION", "#6b6b7b", "현재 세력이 힘을 응축하며 관망 중인 구간입니다."
+        else:
+            if px_diff > 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "SMART MONEY ACCUMULATING", "var(--green)", "진짜 상승: 세력이 돈 싸들고 롱에 올라타는 중입니다."
+            elif px_diff > 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "SHORT COVERING DETECTED", "var(--orange)", "가짜 상승: 숏 개미들이 손절해서 나오는 반등입니다."
+            elif px_diff < 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "AGGRESSIVE SELLING", "var(--red)", "진짜 하락: 세력이 본격적으로 하락 배팅에 들어갔습니다."
+            elif px_diff < 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "LONG LIQUIDATION EXHAUSTION", "var(--cyan)", "가짜 하락: 롱 개미들 뚝배기 깨지는 중. 하락 끝물입니다."
 
-    # 분석 카드 레이아웃
+    # 분석 카드
     a1, a2 = st.columns(2)
     with a1:
-        with st.popover(f"❓ 분석 가이드 (클릭)", use_container_width=True):
-            st.markdown("### 🎰 판돈(OI)으로 보는 세력의 의도")
-            st.markdown("| 상태 | 조건 | 의도 (쉽게 보기) |\n| :--- | :--- | :--- |\n| **진짜 상승** | 가격↑ 판돈↑ | 고래들이 **롱 배팅**하러 들어옴 |\n| **가짜 상승** | 가격↑ 판돈↓ | 숏 친 개미들이 **도망**가서 생기는 반등 |\n| **진짜 하락** | 가격↓ 판돈↑ | 고래들이 **하락 배팅**하러 들어옴 |\n| **가짜 하락** | 가격↓ 판돈↓ | 롱 친 개미들 **뚝배기 깨지는** 중 |")
-        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {sm_color};"><div style="color:var(--dim); font-size:11px;">SMART MONEY FLOW</div><div style="font-size:24px; font-weight:900; color:{sm_color}; margin:10px 0;">{sm_signal}</div><div style="font-size:13px; color:#aaa; line-height:1.5;">{sm_desc}</div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">OI Delta: <span style="color:{"var(--green)" if oi_diff>0 else "var(--red)"}">{oi_diff:+,.2f}</span></div></div>', unsafe_allow_html=True)
+        with st.popover(f"❓ 분석 가이드", use_container_width=True):
+            st.markdown("### 🎰 판돈(OI)으로 보는 진짜/가짜 구분법\n- **상승+판돈↑**: 고래 매집 (진짜)\n- **상승+판돈↓**: 숏 손절 (가짜)\n- **하락+판돈↑**: 고래 매도 (진짜)\n- **하락+판돈↓**: 롱 청산 (가짜)")
+        st.markdown(f"""
+            <div class="analysis-card" style="border-top:4px solid {sm_color};">
+                <div style="color:var(--dim); font-size:11px;">SMART MONEY FLOW</div>
+                <div style="font-size:22px; font-weight:900; color:{sm_color}; margin:10px 0;">{sm_signal}</div>
+                <div style="font-size:13px; color:#aaa; line-height:1.4;">{sm_desc}</div>
+                <div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">
+                    Live OI: {cur_oi:,.0f} | Delta: <span style="color:{'var(--green)' if oi_diff>0 else 'var(--red)'}">{oi_diff:+,.2f}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     with a2:
-        status, s_color = ("CRITICAL", "var(--red)") if magnet_score > 15 else (("WARNING", "var(--orange)") if magnet_score > 8 else ("STABLE", "#6b6b7b"))
-        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {s_color};"><div style="color:var(--dim); font-size:11px;">LIQUIDATION MAGNET</div><div style="font-size:32px; font-weight:900; color:{s_color}; margin:10px 0;">${magnet_score:.2f}M</div><div style="margin-top:5px;"><span class="status-tag" style="background:{s_color};">{status}</span></div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">현재가 근처 잠재적 청산 폭발력 (범위 보정됨)</div></div>', unsafe_allow_html=True)
+        s_tag, s_color = ("CRITICAL", "var(--red)") if magnet_score > 15 else (("WARNING", "var(--orange)") if magnet_score > 8 else ("STABLE", "#6b6b7b"))
+        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {s_color};"><div style="color:var(--dim); font-size:11px;">LIQUIDATION MAGNET</div><div style="font-size:32px; font-weight:900; color:{s_color}; margin:10px 0;">${magnet_score:.2f}M</div><div style="margin-top:5px;"><span class="status-tag" style="background:{s_color};">{s_tag}</span></div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">현재가 근처 잠재적 청산 폭발력</div></div>', unsafe_allow_html=True)
 
-    # 필터 컨트롤러 (기간 설정 업데이트)
+    # 설정 및 시각화 (동일)
     p_list = ["24H", "48H", "3D", "1W", "2W", "1M", "ALL"]
     c1, c2, c3, c4 = st.columns(4)
     with c1: 
-        selected_p = st.selectbox("분석 그룹 (기간)", p_list, index=p_list.index(st.session_state.period))
+        selected_p = st.selectbox("분석 그룹", p_list, index=p_list.index(st.session_state.period))
         if selected_p != st.session_state.period:
             st.session_state.period = selected_p
             st.rerun()
     with c2: range_p = st.selectbox("표시 범위 %", [1, 2, 5, 10, 15, 20, 30, 50], index=4)
-    step_list = [0.1, 0.5, 1, 5, 10, 50, 100, 200]
-    with c3: step_s = st.selectbox("사다리 정밀도 $", step_list, index=step_list.index(10 if coin=="BTC" else 1))
+    with c3: step_s = st.selectbox("사다리 정밀도 $", [1, 5, 10, 50, 100, 200], index=2)
     with c4: min_val = st.number_input("최소 물량 필터 ($)", value=0)
 
-    # 사다리 연산 및 시각화
+    # 사다리 연산
     lo, hi = px * (1 - range_p/100), px * (1 + range_p/100)
     ladder = {}
     for p in all_pos:
@@ -172,12 +179,9 @@ if data:
     max_v = max([v["L"] + v["S"] for v in ladder.values()] + [1])
     max_d = max([abs(v["S"] - v["L"]) for v in ladder.values()] + [1])
     whales = sorted(all_pos, key=lambda x: x['posVal'], reverse=True)[:15]
-    for w in whales:
-        w['ent'] = w['liqPx'] / 0.8 if w['isLong'] else w['liqPx'] / 1.2
-        w['isP'] = (px > w['ent']) if w['isLong'] else (px < w['ent'])
-    
     payload = json.dumps({"price": px, "map": ladder, "whales": whales, "maxV": max_v, "maxD": max_d, "coin": coin, "minV": min_val, "tL": sum(p['posVal'] for p in all_pos if p['isLong']), "tS": sum(p['posVal'] for p in all_pos if not p['isLong'])})
 
+    # HTML 렌더링 (사다리)
     html_code = f"""
     <!DOCTYPE html><html><head><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600;800&display=swap" rel="stylesheet"><style>
     :root{{--bg:#05050a;--card:#0e0e1a;--ln:#1e1e30;--g:#00ffa3;--r:#ff3e3e;--gold:#ffcc00;--cyan:#00f2ff;--orange:#ff8c00;--dim:#6b6b7b;}}
@@ -200,7 +204,6 @@ if data:
     """
     components.html(html_code, height=1200, scrolling=True)
 
-    # 로그
-    st.markdown(f"<h3 style='color:var(--gold); margin-top:30px; font-size:18px; font-weight:900;'>📡 통합 실시간 분석 로그 (최종 갱신: {get_kst_now().strftime('%H:%M:%S')})</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3 style='color:var(--gold); margin-top:30px; font-size:18px; font-weight:900;'>📡 통합 실시간 분석 로그</h3>", unsafe_allow_html=True)
     briefing_html = "".join(st.session_state.briefing_history[:50])
     st.markdown(f'<div class="briefing-container">{briefing_html}</div>', unsafe_allow_html=True)
