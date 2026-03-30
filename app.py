@@ -33,7 +33,7 @@ st.markdown("""
     [data-testid="stHeader"] {display: none;}
     footer {display: none;}
 
-    /* 버튼 및 입력창 스타일 */
+    /* 버튼 스타일 */
     .stRadio div[role="radiogroup"] { flex-direction: row !important; gap: 10px; }
     .stRadio div[role="radiogroup"] label { 
         background: #1a1a2e; border: 1px solid var(--border); padding: 5px 20px !important; border-radius: 4px; color: var(--dim); font-weight: 800; cursor: pointer; transition: 0.3s;
@@ -41,13 +41,13 @@ st.markdown("""
     .stRadio div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child { display: none; }
     .stRadio div[role="radiogroup"] label:hover { border-color: var(--green); }
     
-    /* 분석 카드 디자인 */
+    /* 분석 카드 */
     .analysis-card { 
-        background: var(--card); border: 1px solid var(--border); padding: 18px; border-radius: 12px; height: 180px; position: relative;
+        background: var(--card); border: 1px solid var(--border); padding: 20px; border-radius: 12px; height: 180px; position: relative;
     }
-    .status-tag { padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 900; color: #000; text-transform: uppercase; }
+    .status-tag { padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 900; color: #000; text-transform: uppercase; }
 
-    /* 로그 컨테이너 */
+    /* 로그 */
     .briefing-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; height: 300px; overflow-y: auto; margin-top: 20px; border-top: 2px solid var(--gold); }
     .log-entry { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; font-family: 'JetBrains Mono'; }
     </style>
@@ -62,22 +62,18 @@ def safe_api_call(url, payload=None, is_post=True):
     except: return None
 
 @st.cache_data(ttl=12)
-def fetch_all_market_data(coin, period):
-    # 1. 하이퍼리퀴드 가격
+def fetch_core_data(coin, period):
+    # 1. 가격
     mids = safe_api_call("https://api.hyperliquid.xyz/info", {"type": "allMids"})
     px = float(mids[coin]) if mids and coin in mids else 0
     
-    # 2. 바이낸스 OI 및 청산
+    # 2. 미결제약정(OI) 및 실시간 청산
     oi_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={coin}USDT", is_post=False)
     cur_oi = float(oi_res['openInterest']) if oi_res else 0
     bn_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={coin}USDT&limit=50", is_post=False)
     actual_m = sum(float(o['origQty']) * float(o['price']) for o in bn_res) / 1e6 if isinstance(bn_res, list) else 0
 
-    # 3. 시장 도미넌스 (CoinGecko Global API)
-    global_data = safe_api_call("https://api.coingecko.com/api/v3/global", is_post=False)
-    btc_dom = global_data['data']['market_cap_percentage']['btc'] if global_data else 0
-
-    # 4. 고래 포지션
+    # 3. 고래 포지션
     cfg = {"24H": 100, "48H": 150, "1W": 200, "ALL": 300}.get(period, 100)
     lb = safe_api_call(f"https://stats-data.hyperliquid.xyz/Mainnet/leaderboard?window=day", is_post=False)
     hl_pos = []
@@ -95,57 +91,49 @@ def fetch_all_market_data(coin, period):
             hl_pos = [r for r in list(ex.map(fetch_hl, addrs)) if r]
 
     potential_vol = sum(p['posVal'] for p in hl_pos if px * 0.99 <= p['liqPx'] <= px * 1.01)
-    return {"price": px, "oi": cur_oi, "actual": actual_m, "positions": hl_pos, "magnet": (potential_vol/1e6)+actual_m, "dom": btc_dom}
+    return {"price": px, "oi": cur_oi, "actual": actual_m, "positions": hl_pos, "magnet": (potential_vol/1e6)+actual_m}
 
 # 4. 메인 대시보드
 if 'prev_oi' not in st.session_state: st.session_state.prev_oi = 0
 if 'prev_px' not in st.session_state: st.session_state.prev_px = 0
 if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
 
-# 헤더
 h_col1, h_col2 = st.columns([2.5, 1])
 with h_col1:
     st.markdown(f"<h1 style='color:var(--green); margin:0; font-weight:900; font-size:32px;'>🐋 TIMINGBIT LIQUIDATION INTELLIGENCE</h1>", unsafe_allow_html=True)
 with h_col2:
     coin = st.radio("COIN", ["BTC", "ETH", "SOL"], horizontal=True, label_visibility="collapsed")
 
-data = fetch_all_market_data(coin, st.session_state.get('period', "24H"))
+data = fetch_core_data(coin, st.session_state.get('period', "24H"))
 
 if data:
-    px, cur_oi, actual_m, magnet_score, btc_dom = data['price'], data['oi'], data['actual'], data['magnet'], data['dom']
+    px, cur_oi, actual_m, magnet_score = data['price'], data['oi'], data['actual'], data['magnet']
     all_pos = data['positions']
 
-    # OI 및 가격 변화 연산
     oi_diff = cur_oi - st.session_state.prev_oi if st.session_state.prev_oi > 0 else 0
     px_diff = px - st.session_state.prev_px if st.session_state.prev_px > 0 else 0
     st.session_state.prev_oi, st.session_state.prev_px = cur_oi, px
 
-    # 분석 결과 도출
     sm_signal, sm_color, sm_desc = "MARKET SCANNING...", "#6b6b7b", "세력의 유의미한 움직임을 추적 중입니다."
     if abs(oi_diff) > (cur_oi * 0.00001):
-        if px_diff > 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "SMART MONEY ACCUMULATING", "var(--green)", "상승+OI증가: 세력의 강력한 매집 신호입니다."
+        if px_diff > 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "SMART MONEY ACCUMULATING", "var(--green)", "상승+OI증가: 세력이 롱 포지션을 공격적으로 매집 중입니다."
         elif px_diff > 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "SHORT COVERING DETECTED", "var(--orange)", "상승+OI감소: 숏 포지션 청산으로 인한 일시적 반등입니다."
-        elif px_diff < 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "AGGRESSIVE SELLING", "var(--red)", "하락+OI증가: 세력의 강력한 신규 숏 진입 신호입니다."
-        elif px_diff < 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "LONG LIQUIDATION EXHAUSTION", "var(--cyan)", "하락+OI감소: 롱 청산 끝물이며 반등 가능성이 있습니다."
+        elif px_diff < 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "AGGRESSIVE SELLING", "var(--red)", "하락+OI증가: 세력이 신규 숏 포지션을 대거 구축 중입니다."
+        elif px_diff < 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "LONG LIQUIDATION EXHAUSTION", "var(--cyan)", "하락+OI감소: 롱 청산 끝물이며 반등 가능성이 높습니다."
 
-    # 상단 분석 카드 (3열)
-    a1, a2, a3 = st.columns(3)
-    
+    # 분석 카드 (2열로 확장 배치)
+    a1, a2 = st.columns(2)
     with a1:
         with st.popover(f"🔍 {sm_signal} 가이드", use_container_width=True):
             st.markdown("### 📊 스마트 머니 로직")
             st.table({"상태": ["ACCUM", "COVERING", "SELLING", "LIQ"], "조건": ["P↑ OI↑", "P↑ OI↓", "P↓ OI↑", "P↓ OI↓"], "의도": ["진짜상승", "숏손절", "진짜하락", "롱청산"]})
-        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {sm_color};"><div style="color:var(--dim); font-size:11px;">SMART MONEY FLOW</div><div style="font-size:18px; font-weight:800; color:{sm_color}; margin:10px 0;">{sm_signal}</div><div style="font-size:12px; color:#aaa; line-height:1.4;">{sm_desc}</div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">OI Delta: <span style="color:{"var(--green)" if oi_diff>0 else "var(--red)"}">{oi_diff:+,.2f}</span></div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {sm_color};"><div style="color:var(--dim); font-size:11px;">SMART MONEY FLOW</div><div style="font-size:24px; font-weight:900; color:{sm_color}; margin:10px 0;">{sm_signal}</div><div style="font-size:13px; color:#aaa; line-height:1.5;">{sm_desc}</div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">OI Delta: <span style="color:{"var(--green)" if oi_diff>0 else "var(--red)"}">{oi_diff:+,.2f}</span></div></div>', unsafe_allow_html=True)
 
     with a2:
         status, s_color = ("CRITICAL", "var(--red)") if magnet_score > 15 else (("WARNING", "var(--orange)") if magnet_score > 5 else ("STABLE", "#6b6b7b"))
-        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {s_color};"><div style="color:var(--dim); font-size:11px;">LIQUIDATION MAGNET</div><div style="font-size:24px; font-weight:900; color:{s_color}; margin:10px 0;">${magnet_score:.2f}M</div><div style="margin-top:5px;"><span class="status-tag" style="background:{s_color};">{status}</span></div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">현재가 ±1% 내 잠재적 청산 에너지</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {s_color};"><div style="color:var(--dim); font-size:11px;">LIQUIDATION MAGNET</div><div style="font-size:32px; font-weight:900; color:{s_color}; margin:10px 0;">${magnet_score:.2f}M</div><div style="margin-top:5px;"><span class="status-tag" style="background:{s_color};">{status}</span></div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">현재가 ±1% 내 잠재적 청산 폭발력</div></div>', unsafe_allow_html=True)
 
-    with a3:
-        dom_color = "var(--cyan)" if btc_dom > 50 else "var(--gold)"
-        st.markdown(f'<div class="analysis-card" style="border-top:4px solid {dom_color};"><div style="color:var(--dim); font-size:11px;">MARKET PULSE</div><div style="font-size:24px; font-weight:900; color:{dom_color}; margin:10px 0;">{btc_dom:.2f}%</div><div style="color:#aaa; font-size:12px;">BTC DOMINANCE</div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">{"비트 독주 장세 (알트 주의)" if btc_dom > 50 else "알트 순환매 장세 기대"}</div></div>', unsafe_allow_html=True)
-
-    # 필터 및 시각화 로직 (사다리, 고래 카드는 이전과 동일)
+    # 필터
     c1, c2, c3, c4 = st.columns(4)
     with c1: period = st.selectbox("분석 그룹", ["24H", "48H", "1W", "ALL"], index=0)
     with c2: range_p = st.selectbox("표시 범위 %", [1, 2, 5, 10, 15, 20, 25], index=3)
@@ -154,7 +142,7 @@ if data:
     with c3: step_s = st.selectbox("사다리 정밀도 $", step_list, index=step_list.index(default_step))
     with c4: min_val = st.number_input("최소 물량 필터", value=0)
 
-    # (이하 사다리 연산 및 HTML 렌더링 코드는 동일하므로 생략 없이 풀버전 유지)
+    # 사다리 연산
     lo, hi = px * (1 - range_p/100), px * (1 + range_p/100)
     ladder = {}
     for p in all_pos:
@@ -195,7 +183,7 @@ if data:
     """
     components.html(html_code, height=1200, scrolling=True)
 
-    # 실시간 분석 로그
+    # 로그
     st.markdown(f"<h3 style='color:var(--gold); margin-top:30px; font-size:18px; font-weight:900;'>📡 통합 실시간 분석 로그</h3>", unsafe_allow_html=True)
     briefing_html = "".join(st.session_state.briefing_history[:50])
     st.markdown(f'<div class="briefing-container">{briefing_html}</div>', unsafe_allow_html=True)
