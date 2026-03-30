@@ -63,17 +63,12 @@ def safe_api_call(url, payload=None, is_post=True):
 
 @st.cache_data(ttl=12)
 def fetch_core_data(coin, period):
-    # 1. 가격
     mids = safe_api_call("https://api.hyperliquid.xyz/info", {"type": "allMids"})
     px = float(mids[coin]) if mids and coin in mids else 0
-    
-    # 2. 미결제약정(OI) 및 실시간 청산
     oi_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={coin}USDT", is_post=False)
     cur_oi = float(oi_res['openInterest']) if oi_res else 0
     bn_res = safe_api_call(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={coin}USDT&limit=50", is_post=False)
     actual_m = sum(float(o['origQty']) * float(o['price']) for o in bn_res) / 1e6 if isinstance(bn_res, list) else 0
-
-    # 3. 고래 포지션
     cfg = {"24H": 100, "48H": 150, "1W": 200, "ALL": 300}.get(period, 100)
     lb = safe_api_call(f"https://stats-data.hyperliquid.xyz/Mainnet/leaderboard?window=day", is_post=False)
     hl_pos = []
@@ -89,11 +84,10 @@ def fetch_core_data(coin, period):
             return None
         with ThreadPoolExecutor(max_workers=30) as ex:
             hl_pos = [r for r in list(ex.map(fetch_hl, addrs)) if r]
-
     potential_vol = sum(p['posVal'] for p in hl_pos if px * 0.99 <= p['liqPx'] <= px * 1.01)
     return {"price": px, "oi": cur_oi, "actual": actual_m, "positions": hl_pos, "magnet": (potential_vol/1e6)+actual_m}
 
-# 4. 메인 대시보드
+# 4. 메인 실행
 if 'prev_oi' not in st.session_state: st.session_state.prev_oi = 0
 if 'prev_px' not in st.session_state: st.session_state.prev_px = 0
 if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
@@ -121,19 +115,27 @@ if data:
         elif px_diff < 0 and oi_diff > 0: sm_signal, sm_color, sm_desc = "AGGRESSIVE SELLING", "var(--red)", "하락+OI증가: 세력이 신규 숏 포지션을 대거 구축 중입니다."
         elif px_diff < 0 and oi_diff < 0: sm_signal, sm_color, sm_desc = "LONG LIQUIDATION EXHAUSTION", "var(--cyan)", "하락+OI감소: 롱 청산 끝물이며 반등 가능성이 높습니다."
 
-    # 분석 카드 (2열로 확장 배치)
     a1, a2 = st.columns(2)
     with a1:
-        with st.popover(f"🔍 {sm_signal} 가이드", use_container_width=True):
-            st.markdown("### 📊 스마트 머니 로직")
-            st.table({"상태": ["ACCUM", "COVERING", "SELLING", "LIQ"], "조건": ["P↑ OI↑", "P↑ OI↓", "P↓ OI↑", "P↓ OI↓"], "의도": ["진짜상승", "숏손절", "진짜하락", "롱청산"]})
+        # 가이드 팝업 (가장 쉬운 버전)
+        with st.popover(f"❓ 분석 가이드 (클릭)", use_container_width=True):
+            st.markdown("### 🎰 판돈(OI)으로 보는 세력의 의도")
+            st.markdown("""
+            | 상태 | 조건 | 의도 (쉽게 보기) |
+            | :--- | :--- | :--- |
+            | **진짜 상승** | 가격↑ 판돈↑ | 고래들이 돈 싸 들고 **상승 배팅**하러 들어옴 |
+            | **가짜 상승** | 가격↑ 판돈↓ | 숏 친 개미들이 **손절하며 도망**가서 생기는 반등 |
+            | **진짜 하락** | 가격↓ 판돈↑ | 고래들이 본격적으로 **하락 배팅**하러 들어옴 |
+            | **가짜 하락** | 가격↓ 판돈↓ | 롱 친 개미들 **뚝배기 깨져서(청산)** 강제로 쫓겨나는 중 |
+            """)
+            st.info("💡 판돈(OI)이 늘어나면 세력이 움직이는 '진짜' 무빙, 판돈이 줄어들면 누군가 털리는 '가짜' 무빙일 확률이 높습니다.")
+            
         st.markdown(f'<div class="analysis-card" style="border-top:4px solid {sm_color};"><div style="color:var(--dim); font-size:11px;">SMART MONEY FLOW</div><div style="font-size:24px; font-weight:900; color:{sm_color}; margin:10px 0;">{sm_signal}</div><div style="font-size:13px; color:#aaa; line-height:1.5;">{sm_desc}</div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">OI Delta: <span style="color:{"var(--green)" if oi_diff>0 else "var(--red)"}">{oi_diff:+,.2f}</span></div></div>', unsafe_allow_html=True)
 
     with a2:
         status, s_color = ("CRITICAL", "var(--red)") if magnet_score > 15 else (("WARNING", "var(--orange)") if magnet_score > 5 else ("STABLE", "#6b6b7b"))
         st.markdown(f'<div class="analysis-card" style="border-top:4px solid {s_color};"><div style="color:var(--dim); font-size:11px;">LIQUIDATION MAGNET</div><div style="font-size:32px; font-weight:900; color:{s_color}; margin:10px 0;">${magnet_score:.2f}M</div><div style="margin-top:5px;"><span class="status-tag" style="background:{s_color};">{status}</span></div><div style="position:absolute; bottom:15px; font-size:11px; color:var(--dim);">현재가 ±1% 내 잠재적 청산 폭발력</div></div>', unsafe_allow_html=True)
 
-    # 필터
     c1, c2, c3, c4 = st.columns(4)
     with c1: period = st.selectbox("분석 그룹", ["24H", "48H", "1W", "ALL"], index=0)
     with c2: range_p = st.selectbox("표시 범위 %", [1, 2, 5, 10, 15, 20, 25], index=3)
@@ -142,7 +144,6 @@ if data:
     with c3: step_s = st.selectbox("사다리 정밀도 $", step_list, index=step_list.index(default_step))
     with c4: min_val = st.number_input("최소 물량 필터", value=0)
 
-    # 사다리 연산
     lo, hi = px * (1 - range_p/100), px * (1 + range_p/100)
     ladder = {}
     for p in all_pos:
