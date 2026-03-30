@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 # 1. 페이지 설정
-st.set_page_config(page_title="LIQUIDATION INTELLIGENCE PRO", layout="wide")
+st.set_page_config(page_title="TIMINGBIT LIQUIDATION INTELLIGENCE", layout="wide")
 
 def get_kst_now():
     return datetime.now(timezone(timedelta(hours=9)))
