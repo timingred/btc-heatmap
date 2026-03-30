@@ -10,21 +10,29 @@ st.set_page_config(page_title="LIQUIDATION INTELLIGENCE PRO", layout="wide")
 def get_kst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
+# 로그 기록 함수
+def add_log(msg, type="info"):
+    colors = {"info": "#6b6b7b", "success": "#00ffa3", "warning": "#ff8c00", "danger": "#ff3e3e"}
+    now = get_kst_now().strftime("%H:%M:%S")
+    log_entry = f'<div class="log-entry" style="color:{colors.get(type, "#6b6b7b")}"><span style="color:#444">[ {now} ]</span> {msg}</div>'
+    if 'briefing_history' not in st.session_state:
+        st.session_state.briefing_history = []
+    st.session_state.briefing_history.insert(0, log_entry) # 최신 로그가 위로
+
 # 2. 전역 스타일
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Noto+Sans+KR:wght@400;700;900&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&display=swap');
     :root { 
         --bg: #05050a; --card: #0e0e1a; --border: #1e1e30; 
         --green: #00ffa3; --red: #ff3e3e; --gold: #ffcc00; 
         --cyan: #00f2ff; --orange: #ff8c00; --binance: #F3BA2F; --dim: #6b6b7b; 
     }
     .stApp {background-color: var(--bg); color: #e1e1e6;}
-    .block-container {padding: 0.5rem 2rem !important; max-width: 100%; font-family: 'JetBrains Mono', 'Noto Sans KR', sans-serif !important;}
+    .block-container {padding: 0.5rem 2rem !important; max-width: 100%; font-family: 'JetBrains Mono', sans-serif !important;}
     [data-testid="stHeader"] {display: none;}
     footer {display: none;}
 
-    /* 코인 선택 라디오 버튼 스타일 */
     .stRadio div[role="radiogroup"] { flex-direction: row !important; gap: 10px; }
     .stRadio div[role="radiogroup"] label { 
         background: #1a1a2e; border: 1px solid var(--border); padding: 5px 20px !important; border-radius: 4px; color: var(--dim); font-weight: 800; cursor: pointer; transition: 0.3s;
@@ -33,8 +41,8 @@ st.markdown("""
     .stRadio div[role="radiogroup"] label:hover { border-color: var(--green); }
     
     .intensity-card { background: rgba(255,255,255,0.03); border-left: 4px solid var(--orange); padding: 12px; border-radius: 4px; margin: 15px 0; }
-    .briefing-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; height: 250px; overflow-y: auto; margin-top: 20px; }
-    .log-entry { padding: 8px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; }
+    .briefing-container { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; height: 300px; overflow-y: auto; margin-top: 20px; border-top: 2px solid var(--gold); }
+    .log-entry { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; font-family: 'JetBrains Mono'; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -72,8 +80,9 @@ def fetch_data(coin, period):
     bn_intensity = sum(float(o['origQty']) * float(o['price']) for o in bn_data) if isinstance(bn_data, list) else 0
     return {"price": px, "positions": hl_pos, "intensity": bn_intensity, "updatedAt": get_kst_now()}
 
-# 4. 메인 레이아웃
+# 4. 메인 로직
 if 'briefing_history' not in st.session_state: st.session_state.briefing_history = []
+if 'last_coin' not in st.session_state: st.session_state.last_coin = None
 
 h_col1, h_col2 = st.columns([2, 1])
 with h_col1:
@@ -81,10 +90,19 @@ with h_col1:
 with h_col2:
     coin = st.radio("COIN", ["BTC", "ETH", "SOL"], horizontal=True, label_visibility="collapsed")
 
+# 코인 변경 로그
+if st.session_state.last_coin != coin:
+    add_log(f"분석 대상이 <b>{coin}</b>으로 변경되었습니다.", "info")
+    st.session_state.last_coin = coin
+
 data = fetch_data(coin, st.session_state.get('period', "24H"))
 
 if data:
     px, all_pos, intensity_m = data['price'], data['positions'], data['intensity'] / 1e6
+    
+    # 바이낸스 청산 화력 로그
+    if intensity_m > 0.5:
+        add_log(f"🚨 {coin} 바이낸스 대량 청산 발생: <b>${intensity_m:.2f}M</b>", "danger")
     
     # 설정 UI
     cc = st.columns([1, 1, 1, 1])
@@ -97,10 +115,12 @@ if data:
 
     if period != st.session_state.get('period', "24H"):
         st.session_state.period = period
+        add_log(f"분석 기간이 {period}로 갱신되었습니다.", "warning")
         st.rerun()
 
     st.markdown(f'<div class="intensity-card">{coin} 실시간 청산 화력: <b style="color:var(--orange); font-size:18px;">${intensity_m:.2f}M</b></div>', unsafe_allow_html=True)
 
+    # 사다리 연산
     tL, tS = sum(p['posVal'] for p in all_pos if p['isLong']), sum(p['posVal'] for p in all_pos if not p['isLong'])
     lo, hi = px * (1 - range_p/100), px * (1 + range_p/100)
     ladder = {}
@@ -123,7 +143,7 @@ if data:
 
     payload = json.dumps({"price": px, "map": ladder, "whales": whales, "maxV": max_v, "maxD": max_d, "gold": golden, "coin": coin, "minV": min_val, "tL": tL, "tS": tS})
 
-    # HTML/JS 렌더링 (고래 카드, 사다리, 델타 바 포함)
+    # 메인 시각화 (HTML)
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -131,7 +151,7 @@ if data:
         <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600;800&display=swap" rel="stylesheet">
         <style>
             :root{{--bg:#05050a;--card:#0e0e1a;--ln:#1e1e30;--g:#00ffa3;--r:#ff3e3e;--gold:#ffcc00;--cyan:#00f2ff;--orange:#ff8c00;--dim:#6b6b7b;}}
-            body{{background:var(--bg); color:#e1e1e6; font-family:'JetBrains Mono', monospace; margin:0; padding:10px; overflow-x:hidden;}}
+            body{{background:var(--bg); color:#e1e1e6; font-family:'JetBrains Mono', monospace; margin:0; padding:10px; overflow:hidden;}}
             #wCard{{display:grid; grid-template-columns: repeat(5, 1fr); gap:12px; margin-bottom:20px;}}
             .wc{{background:var(--card); border:1px solid var(--ln); padding:15px; border-radius:8px; font-size:14px; position:relative; line-height:1.6;}}
             .pl-tag{{position:absolute; top:12px; right:12px; font-size:9px; font-weight:800; padding:2px 5px; border-radius:4px;}}
@@ -187,3 +207,8 @@ if data:
     </html>
     """
     components.html(html_code, height=1200, scrolling=True)
+
+    # 📡 하단 브리핑 로그 렌더링
+    st.markdown(f"<h3 style='color:var(--gold); margin-top:30px; font-size:18px; font-weight:900;'>📡 통합 실시간 분석 로그</h3>", unsafe_allow_html=True)
+    briefing_html = "".join(st.session_state.briefing_history[:50])
+    st.markdown(f'<div class="briefing-container">{briefing_html}</div>', unsafe_allow_html=True)
