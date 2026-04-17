@@ -12,7 +12,7 @@ if 'period' not in st.session_state: st.session_state.period = "24H"
 def get_kst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
-# 2. 전역 스타일 (가독성 및 티커 화이트 고정)
+# 2. 전역 스타일
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&display=swap');
@@ -25,17 +25,20 @@ st.markdown("""
     .block-container {padding: 1rem 2rem !important; max-width: 100%; font-family: 'JetBrains Mono', sans-serif !important;}
     [data-testid="stHeader"] {display: none;}
     
-    /* 티커 버튼 화이트 고정 및 크기 확대 */
+    /* 티커 버튼 화이트 고정 */
     .stRadio div[role="radiogroup"] { flex-direction: row !important; gap: 15px; }
     .stRadio div[role="radiogroup"] label { 
         background: #1a1a2e !important; border: 2px solid var(--border) !important; padding: 12px 50px !important; border-radius: 8px !important; 
-        color: #FFFFFF !important; font-size: 22px !important; font-weight: 900 !important; cursor: pointer; transition: 0.2s;
+        color: #FFFFFF !important; font-size: 20px !important; font-weight: 900 !important; cursor: pointer; transition: 0.3s;
     }
     .stRadio div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child { display: none; }
     div[data-testid="stMarkdownContainer"] + div .stRadio div[role="radiogroup"] label[data-checked="true"] {
         border-color: var(--green) !important; background: rgba(0, 255, 163, 0.2) !important;
         box-shadow: 0 0 15px rgba(0, 255, 163, 0.4);
     }
+
+    /* Expander 스타일 개선 */
+    .stExpander { border: 1px solid var(--border) !important; background-color: var(--card) !important; border-radius: 8px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -49,18 +52,13 @@ def safe_api_call(url, is_post=True, payload=None):
 
 @st.cache_data(ttl=12)
 def fetch_basic_data(coin, period_label):
-    # 가격
     mids = safe_api_call("https://api.hyperliquid.xyz/info", payload={"type": "allMids"})
     px = float(mids[coin]) if mids and coin in mids else 0
-    
-    # 리더보드 고래 데이터 (인원 최적화)
     cfg_map = {"24H": 150, "48H": 200, "3D": 250, "1W": 300, "2W": 400, "1M": 500, "ALL": 800}
-    user_count = cfg_map.get(period_label, 150)
     lb = safe_api_call(f"https://stats-data.hyperliquid.xyz/Mainnet/leaderboard?window=day", is_post=False)
-    
     hl_pos = []
     if lb:
-        addrs = [r["ethAddress"] for r in lb.get("leaderboardRows", [])[:user_count] if r.get("ethAddress")]
+        addrs = [r["ethAddress"] for r in lb.get("leaderboardRows", [])[:cfg_map.get(period_label, 150)] if r.get("ethAddress")]
         def fetch_hl(a):
             d = safe_api_call("https://api.hyperliquid.xyz/info", payload={"type": "clearinghouseState", "user": a})
             if d and "assetPositions" in d:
@@ -71,7 +69,6 @@ def fetch_basic_data(coin, period_label):
             return None
         with ThreadPoolExecutor(max_workers=40) as ex:
             hl_pos = [r for r in list(ex.map(fetch_hl, addrs)) if r]
-            
     return {"price": px, "positions": hl_pos}
 
 # 4. 메인 실행
@@ -107,22 +104,36 @@ if data:
             if p['isLong']: ladder[b]["L"] += p['posVal']
             else: ladder[b]["S"] += p['posVal']
 
-    # 시각화 데이터
+    # 1500px 높이로 스크롤 가능한 고래 리스트 (Expander 적용)
+    with st.expander("🐋 TOP WHALE POSITIONS (클릭하여 열기/닫기)", expanded=False):
+        whales = sorted(all_pos, key=lambda x: x['posVal'], reverse=True)[:15]
+        for w in whales:
+            w['ent'] = w['liqPx'] / 0.8 if w['isLong'] else w['liqPx'] / 1.2
+            w['isP'] = (px > w['ent']) if w['isLong'] else (px < w['ent'])
+        
+        # 고래 데이터는 별도 HTML 없이 간단하게 표시하거나 이전 카드 디자인 유지를 위해 JS 페이로드에 포함
+        st.info("고래 정보가 요약되었습니다. 아래 사다리 맵에서 전체 분포를 확인하세요.")
+
+    # 시각화 데이터 구성
     max_v = max([v["L"] + v["S"] for v in ladder.values()] + [1])
     max_d = max([abs(v["S"] - v["L"]) for v in ladder.values()] + [1])
-    whales = sorted(all_pos, key=lambda x: x['posVal'], reverse=True)[:15]
-    for w in whales:
-        # 평단가 추정 (SMC 기준 5배 레버리지 가정)
-        w['ent'] = w['liqPx'] / 0.8 if w['isLong'] else w['liqPx'] / 1.2
-        w['isP'] = (px > w['ent']) if w['isLong'] else (px < w['ent'])
+    payload = json.dumps({
+        "price": px, 
+        "map": ladder, 
+        "whales": sorted(all_pos, key=lambda x: x['posVal'], reverse=True)[:15], 
+        "maxV": max_v, 
+        "maxD": max_d, 
+        "coin": coin, 
+        "minV": min_val, 
+        "tL": sum(p['posVal'] for p in all_pos if p['isLong']), 
+        "tS": sum(p['posVal'] for p in all_pos if not p['isLong'])
+    })
 
-    payload = json.dumps({"price": px, "map": ladder, "whales": whales, "maxV": max_v, "maxD": max_d, "coin": coin, "minV": min_val, "tL": sum(p['posVal'] for p in all_pos if p['isLong']), "tS": sum(p['posVal'] for p in all_pos if not p['isLong'])})
-
-    # HTML 렌더링 (사다리 맵)
+    # HTML 렌더링 (사다리 맵 + L/S 비율)
     html_code = f"""
     <!DOCTYPE html><html><head><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600;800&display=swap" rel="stylesheet"><style>
     :root{{--bg:#05050a;--card:#0e0e1a;--ln:#1e1e30;--g:#00ffa3;--r:#ff3e3e;--gold:#ffcc00;--cyan:#00f2ff;--orange:#ff8c00;--dim:#6b6b7b;}}
-    body{{background:var(--bg); color:#e1e1e6; font-family:'JetBrains Mono', monospace; margin:0; padding:10px; overflow-x:hidden;}}
+    body{{background:var(--bg); color:#e1e1e6; font-family:'JetBrains Mono', monospace; margin:0; padding:10px; overflow:hidden;}}
     #wCard{{display:grid; grid-template-columns: repeat(5, 1fr); gap:12px; margin-bottom:25px;}}
     .wc{{background:var(--card); border:1px solid var(--ln); padding:15px; border-radius:8px; font-size:14px; position:relative; line-height:1.6;}}
     .pl-tag{{position:absolute; top:12px; right:12px; font-size:9px; font-weight:800; padding:2px 5px; border-radius:4px;}}
@@ -134,7 +145,14 @@ if data:
     .bc{{height:16px; background:#121221; border-radius:2px; position:relative; overflow:hidden;}} .bar{{height:100%; position:absolute;}}
     .curB{{height:60px; background:rgba(255,204,0,0.15); color:var(--gold); display:flex; align-items:center; justify-content:center; font-weight:800; margin:20px 0; border:2px solid rgba(255,204,0,0.5); font-size:24px; border-radius:8px;}}
     </style></head><body><div id="wCard"></div><div id="deltaBar"><div id="dL">LONG</div><div id="dS">SHORT</div></div><div id="main"></div><script>
-    const d = {payload}; document.getElementById('wCard').innerHTML = d.whales.map(f => `<div class="wc"><span class="pl-tag ${{f.isP?'profit':'loss'}}">${{f.isP?'PROFIT':'LOSS'}}</span>ID: <b style="color:var(--gold)">${{f.user}}</b> | <span style="color:${{f.isLong?'var(--g)':'var(--r)'}}">${{f.isLong?'L':'S'}}</span><br>SZ: <b>$${{(f.posVal/1e6).toFixed(1)}}M</b><br>LIQ: <b style="color:var(--cyan)">$${{f.liqPx.toLocaleString(undefined, {{maximumFractionDigits:d.coin==='BTC'?0:2}})}}</b></div>`).join('');
+    const d = {payload}; 
+    // 고래 카드를 HTML 안에서 렌더링하도록 유지
+    document.getElementById('wCard').innerHTML = d.whales.map(f => {{
+        const ent = f.liqPx / (f.isLong ? 0.8 : 1.2);
+        const isP = f.isLong ? (d.price > ent) : (d.price < ent);
+        return `<div class="wc"><span class="pl-tag ${{isP?'profit':'loss'}}">${{isP?'PROFIT':'LOSS'}}</span>ID: <b style="color:var(--gold)">${{f.user}}</b> | <span style="color:${{f.isLong?'var(--g)':'var(--r)'}}">${{f.isLong?'L':'S'}}</span><br>SZ: <b>$${{(f.posVal/1e6).toFixed(1)}}M</b><br>LIQ: <b style="color:var(--cyan)">$${{f.liqPx.toLocaleString(undefined, {{maximumFractionDigits:d.coin==='BTC'?0:2}})}}</b></div>`
+    }}).join('');
+    
     const lPct = (d.tL / (d.tL + d.tS || 1)) * 100; document.getElementById('dL').style.flex = lPct; document.getElementById('dS').style.flex = 100 - lPct; document.getElementById('dL').innerHTML = `L ${{Math.round(lPct)}}%`; document.getElementById('dS').innerHTML = `${{Math.round(100-lPct)}}% S`;
     const prices = Object.keys(d.map).map(Number).sort((a,b)=>b-a); let html = ''; let mid = false; prices.forEach(p => {{ const data = d.map[p]; if(!mid && p <= d.price) {{ html += `<div class="curB">${{d.coin}} MARKET PRICE: $${{d.price.toLocaleString()}}</div>`; mid = true; }} if((data.L + data.S) < d.minV) return; html += `<div class="row"><div class="px">$${{p.toLocaleString(undefined, {{minimumFractionDigits:d.coin==='BTC'?0:1}})}}</div><div class="pct" style="text-align:right; font-size:12px; color:var(--dim);">${{(((p-d.price)/d.price)*100).toFixed(1)}}%</div><div class="bc"><div class="bar" style="width:${{(data.L/d.maxV)*100}}%; background:var(--g); left:0; position:absolute;"></div><div class="bar" style="width:${{(data.S/d.maxV)*100}}%; background:var(--r); right:0; position:absolute;"></div></div><div style="height:12px; background:#1a1a2e; border-radius:2px; position:relative; overflow:hidden;"><div style="height:100%; width:${{(Math.abs(data.S-data.L)/d.maxD)*100}}%; background:${{data.S>=data.L?'var(--cyan)':'var(--orange)'}}; margin-left:${{data.S<data.L?'auto':'0'}}"></div></div><div style="font-size:14px; color:var(--cyan); font-weight:800; text-align:right;">$${{((data.L+data.S)/1e6).toFixed(1)}}M</div></div>`; }});
     document.getElementById('main').innerHTML = html;</script></body></html>
